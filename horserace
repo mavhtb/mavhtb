@@ -1,0 +1,644 @@
+-- Arcane Lineage | Halloween Horse Race Farm (Potassium)
+-- Auto Quest : clicks the Horse Race paper on the quest board when no quest is active
+-- Auto Race  : teleports through every gate in order and fires the game's own gate remote
+-- UI: draggable panel (mouse or touch) with two toggles + status, minimize button -> small icon.
+-- Pacing: per-course minimum race time (Waving Sands = 27s).
+
+local Players = game:GetService("Players")
+local RS = game:GetService("ReplicatedStorage")
+local UIS = game:GetService("UserInputService")
+local VirtualUser = game:GetService("VirtualUser")
+local LocalPlayer = Players.LocalPlayer
+
+-- stop any previous copy
+if getgenv().HorseFarm and getgenv().HorseFarm.Stop then
+    pcall(getgenv().HorseFarm.Stop)
+end
+
+--------------------------------------------------------------------
+-- CONFIG
+--------------------------------------------------------------------
+local CFG = {
+    AutoQuest = false,
+    AutoRace = false,
+
+    GateDelay = 0.15,      -- pause after each gate is accepted
+    GateTimeout = 3,       -- seconds to wait for the server to accept a gate
+    MaxRetries = 8,        -- retries on a single gate before the race bot gives up
+
+    AntiIdle = true,       -- stops Roblox's idle kick while you're AFK
+
+    Nudge = true,          -- after teleporting to a gate, shift through it a little and back
+    NudgeDistance = 3,     -- studs to shift along the gate's forward axis
+    PreFireDelay = 0.1,    -- pause between arriving at a gate and firing the remote
+
+    QuestRetry = 10,       -- min seconds between quest click attempts
+    QuestTimeout = 300,    -- if no FinishQuest after this long, assume the quest is over
+    BoardOffset = Vector3.new(7, 0, 0), -- where to stand next to the paper
+
+    -- minimum seconds a race should take, matched against the course name (case-insensitive)
+    MinRaceTime = {
+        ["waving sands"] = 27,
+        ["the crossing"] = 0,
+        ["deeproot canopy"] = 0,
+    },
+}
+
+local function log(...) print("[HorseFarm]", ...) end
+
+--------------------------------------------------------------------
+-- STATE
+--------------------------------------------------------------------
+local alive = true
+local busy = false -- race runner busy
+local state = {
+    questActive = false,
+    questSince = 0,
+    finishedAt = 0,
+    lastClick = 0,
+    completed = 0,
+    questText = "idle",
+    raceText = "waiting",
+}
+local conns = {}
+
+--------------------------------------------------------------------
+-- GAME CONFIG (read from the game's own module)
+--------------------------------------------------------------------
+local okReq, HS = pcall(function()
+    return require(RS:WaitForChild("Libraries"):WaitForChild("HalloweenStory"))
+end)
+if not okReq or type(HS) ~= "table" then
+    warn("[HorseFarm] Could not load HalloweenStory module:", tostring(HS))
+    return
+end
+
+local Gates = HS.Race.Gates
+local Attr = HS.Race.Attributes
+local GateRemote = RS:WaitForChild("Remotes"):WaitForChild("Information"):WaitForChild(HS.Remote)
+
+--------------------------------------------------------------------
+-- HELPERS
+--------------------------------------------------------------------
+local function getRoot()
+    local char = LocalPlayer.Character
+    return char and char:FindFirstChild("HumanoidRootPart")
+end
+
+local function raceActive()
+    return type(LocalPlayer:GetAttribute(Attr.Gate)) == "number"
+        and type(LocalPlayer:GetAttribute(Attr.Gates)) == "number"
+        and type(LocalPlayer:GetAttribute(Attr.Place)) == "string"
+end
+
+local function coursesFolder()
+    local f = workspace
+    for _, name in ipairs(Gates.CoursePath) do
+        f = f and f:FindFirstChild(name)
+    end
+    return f
+end
+
+local function findCourse(folder, place)
+    if not folder or type(place) ~= "string" then return nil end
+    for _, child in ipairs(folder:GetChildren()) do
+        if child.Name == place or child:GetAttribute("Label") == place then
+            return child
+        end
+    end
+    return nil
+end
+
+-- minimum race duration (seconds) for a course, 0 = no pacing
+local function getMinTime(place)
+    local lower = tostring(place):lower()
+    for key, secs in pairs(CFG.MinRaceTime) do
+        if lower:find(key:lower(), 1, true) then
+            return secs
+        end
+    end
+    return 0
+end
+
+--------------------------------------------------------------------
+-- QUEST EVENTS (track StartQuest / FinishQuest from the server)
+--------------------------------------------------------------------
+for _, d in ipairs(RS:GetDescendants()) do
+    if d:IsA("RemoteEvent") and d.Name == "Quest" then
+        table.insert(conns, d.OnClientEvent:Connect(function(action, data)
+            if action == "StartQuest" then
+                state.questActive = true
+                state.questSince = tick()
+                log("Quest started")
+            elseif action == "FinishQuest" then
+                state.questActive = false
+                state.finishedAt = tick()
+                -- the game sends FinishQuest twice; only the one with a table counts
+                if type(data) == "table" then
+                    state.completed = state.completed + 1
+                    log("Quest finished (total " .. state.completed .. ")")
+                end
+            end
+        end))
+    end
+end
+
+--------------------------------------------------------------------
+-- AUTO QUEST
+--------------------------------------------------------------------
+local function acceptQuest()
+    state.lastClick = tick()
+
+    local board = workspace:FindFirstChild("QuestBoards")
+    board = board and board:FindFirstChild("Halloween")
+    board = board and board:FindFirstChild("Board")
+    local papers = board and board:FindFirstChild("Papers")
+    local paper = papers and papers:FindFirstChild("HW_HorseRace")
+    local cd = paper and paper:FindFirstChildOfClass("ClickDetector")
+
+    if not (paper and cd) then
+        state.questText = "Horse Race paper not on board"
+        return
+    end
+
+    local root = getRoot()
+    if not root then
+        state.questText = "no character"
+        return
+    end
+
+    local original = root.CFrame
+    state.questText = "clicking board..."
+
+    root.CFrame = CFrame.new(paper.Position + CFG.BoardOffset)
+    task.wait(0.5)
+    local ok, err = pcall(fireclickdetector, cd)
+    if not ok then warn("[HorseFarm] fireclickdetector error:", tostring(err)) end
+
+    local t = tick()
+    while alive and not state.questActive and (tick() - t) < 4 do
+        task.wait(0.1)
+    end
+
+    if state.questActive then
+        state.questText = "quest active"
+    else
+        state.questText = "no reply from board (retrying)"
+        local r = getRoot()
+        if r then r.CFrame = original end
+    end
+end
+
+task.spawn(function()
+    while alive do
+        task.wait(1)
+        if CFG.AutoQuest then
+            if state.questActive and (tick() - state.questSince) > CFG.QuestTimeout then
+                state.questActive = false
+                state.questText = "quest timed out, retrying"
+            end
+
+            if not state.questActive and not raceActive() and not busy
+                and (tick() - state.lastClick) >= CFG.QuestRetry
+                and (tick() - state.finishedAt) >= 3 then
+                local ok, err = pcall(acceptQuest)
+                if not ok then warn("[HorseFarm] quest error:", tostring(err)) end
+            end
+        end
+    end
+end)
+
+--------------------------------------------------------------------
+-- AUTO RACE
+--------------------------------------------------------------------
+local function runRace()
+    if busy then return end
+    busy = true
+
+    local place = LocalPlayer:GetAttribute(Attr.Place)
+    local course = findCourse(coursesFolder(), place)
+    if not course then
+        warn("[HorseFarm] Course not found for:", tostring(place))
+        state.raceText = "course not found"
+        busy = false
+        return
+    end
+
+    log("Race detected:", tostring(place))
+
+    local raceStart = tick()
+    local minTime = getMinTime(place)
+    if minTime > 0 then log("Pacing enabled for", tostring(place), "(" .. minTime .. "s minimum)") end
+
+    local retries, lastGate = 0, nil
+    while alive and CFG.AutoRace and raceActive() do
+        if LocalPlayer:GetAttribute(Attr.Place) ~= place then break end
+
+        local gate = LocalPlayer:GetAttribute(Attr.Gate)
+        local total = LocalPlayer:GetAttribute(Attr.Gates)
+        state.raceText = place .. " " .. gate .. "/" .. total
+
+        -- pacing: don't reach this gate before its share of the minimum time has passed
+        if minTime > 0 then
+            local target = ((gate - 1) / total) * minTime
+            while alive and CFG.AutoRace and raceActive() and (tick() - raceStart) < target do
+                state.raceText = place .. " " .. gate .. "/" .. total .. " (pacing)"
+                task.wait(0.1)
+            end
+        end
+
+        if gate == lastGate then
+            retries = retries + 1
+            if retries > CFG.MaxRetries then
+                warn("[HorseFarm] Gate " .. gate .. " not accepted after " .. CFG.MaxRetries .. " tries - race bot stopped")
+                state.raceText = "stuck on gate " .. gate
+                CFG.AutoRace = false
+                break
+            end
+        else
+            retries, lastGate = 0, gate
+        end
+
+        local marker = course:FindFirstChild(tostring(gate))
+        local root = getRoot()
+
+        if marker and marker:IsA("BasePart") and root then
+            root.CFrame = marker.CFrame * CFrame.new(0, (Gates.Height or 10) / 2, 0)
+            pcall(function()
+                root.AssemblyLinearVelocity = Vector3.zero
+                root.AssemblyAngularVelocity = Vector3.zero
+            end)
+
+            -- small move through the gate so any position/touch check on the server sees us pass it
+            if CFG.Nudge then
+                local home = marker.CFrame * CFrame.new(0, (Gates.Height or 10) / 2, 0)
+                task.wait(0.03)
+                root.CFrame = home * CFrame.new(0, 0, CFG.NudgeDistance)
+                task.wait(0.03)
+                root.CFrame = home * CFrame.new(0, 0, -CFG.NudgeDistance)
+                task.wait(0.03)
+                root.CFrame = home
+            end
+
+            task.wait(CFG.PreFireDelay)
+            pcall(function() GateRemote:FireServer(Gates.Remote, gate) end)
+
+            local t = tick()
+            while alive and CFG.AutoRace and LocalPlayer:GetAttribute(Attr.Gate) == gate
+                and raceActive() and (tick() - t) < CFG.GateTimeout do
+                task.wait(0.05)
+            end
+        else
+            warn("[HorseFarm] Missing gate marker or character for gate", tostring(gate))
+            task.wait(0.5)
+        end
+
+        task.wait(CFG.GateDelay)
+    end
+
+    if state.raceText:find("stuck") == nil then state.raceText = "waiting" end
+    log("Race loop finished")
+    busy = false
+end
+
+task.spawn(function()
+    while alive do
+        if CFG.AutoRace and raceActive() and not busy then
+            local ok, err = pcall(runRace)
+            if not ok then
+                busy = false
+                warn("[HorseFarm] race error:", tostring(err))
+            end
+        end
+        task.wait(0.5)
+    end
+end)
+
+--------------------------------------------------------------------
+-- UI
+--------------------------------------------------------------------
+local gui = Instance.new("ScreenGui")
+gui.Name = "HorseFarmGui"
+gui.ResetOnSpawn = false
+gui.IgnoreGuiInset = true -- so touch/mouse coordinates line up with element positions
+pcall(function() gui.Parent = (gethui and gethui()) or game:GetService("CoreGui") end)
+
+local PANEL_W, PANEL_H = 210, 300
+local ICON_SIZE = 42
+
+local COL = {
+    panel = Color3.fromRGB(26, 26, 33),
+    bar = Color3.fromRGB(52, 36, 82),
+    barBtn = Color3.fromRGB(78, 54, 118),
+    header = Color3.fromRGB(150, 130, 205),
+    text = Color3.fromRGB(215, 215, 225),
+    on = Color3.fromRGB(46, 150, 80),
+    off = Color3.fromRGB(150, 50, 50),
+    optOn = Color3.fromRGB(45, 110, 160),
+    optOff = Color3.fromRGB(80, 80, 92),
+    box = Color3.fromRGB(44, 44, 56),
+}
+
+local function corner(obj, r)
+    local c = Instance.new("UICorner")
+    c.CornerRadius = UDim.new(0, r or 6)
+    c.Parent = obj
+end
+
+local frame = Instance.new("Frame")
+frame.Size = UDim2.fromOffset(PANEL_W, PANEL_H)
+frame.Position = UDim2.fromOffset(16, 100)
+frame.BackgroundColor3 = COL.panel
+frame.BorderSizePixel = 0
+frame.Active = true
+frame.ClipsDescendants = true
+frame.Parent = gui
+corner(frame, 10)
+
+-- title bar (drag handle) + minimize button
+local title = Instance.new("TextLabel")
+title.Size = UDim2.new(1, -30, 0, 26)
+title.BackgroundColor3 = COL.bar
+title.BorderSizePixel = 0
+title.TextColor3 = Color3.new(1, 1, 1)
+title.Font = Enum.Font.GothamBold
+title.TextSize = 12
+title.Text = "Horse Race Farm"
+title.Active = true
+title.Parent = frame
+
+local btnMin = Instance.new("TextButton")
+btnMin.Size = UDim2.new(0, 30, 0, 26)
+btnMin.Position = UDim2.new(1, -30, 0, 0)
+btnMin.BackgroundColor3 = COL.barBtn
+btnMin.BorderSizePixel = 0
+btnMin.TextColor3 = Color3.new(1, 1, 1)
+btnMin.Font = Enum.Font.GothamBold
+btnMin.TextSize = 16
+btnMin.Text = "-"
+btnMin.Parent = frame
+
+local function sectionHeader(text, y)
+    local l = Instance.new("TextLabel")
+    l.Size = UDim2.new(1, -16, 0, 14)
+    l.Position = UDim2.new(0, 8, 0, y)
+    l.BackgroundTransparency = 1
+    l.TextColor3 = COL.header
+    l.Font = Enum.Font.GothamBold
+    l.TextSize = 10
+    l.TextXAlignment = Enum.TextXAlignment.Left
+    l.Text = text
+    l.Parent = frame
+end
+
+-- side = 0 (left) or 1 (right)
+local function halfButton(side, y)
+    local b = Instance.new("TextButton")
+    b.Size = UDim2.new(0.5, -12, 0, 28)
+    b.Position = side == 0 and UDim2.new(0, 8, 0, y) or UDim2.new(0.5, 4, 0, y)
+    b.BorderSizePixel = 0
+    b.TextColor3 = Color3.new(1, 1, 1)
+    b.Font = Enum.Font.GothamBold
+    b.TextSize = 12
+    b.Text = ""
+    b.Parent = frame
+    corner(b, 6)
+    return b
+end
+
+-- CONTROLS
+sectionHeader("CONTROLS", 30)
+local btnQuest = halfButton(0, 46)
+local btnRace = halfButton(1, 46)
+
+-- OPTIONS
+sectionHeader("OPTIONS", 80)
+local btnNudge = halfButton(0, 96)
+local btnIdle = halfButton(1, 96)
+
+-- BUFFER: minimum race time per course (seconds). Applies from the next race.
+sectionHeader("BUFFER  (seconds, 0 = off)", 130)
+local COURSE_LIST = { "The Crossing", "Waving Sands", "Deeproot Canopy" }
+for i, name in ipairs(COURSE_LIST) do
+    local key = name:lower()
+    local y = 146 + (i - 1) * 26
+
+    local lbl = Instance.new("TextLabel")
+    lbl.Size = UDim2.new(1, -86, 0, 24)
+    lbl.Position = UDim2.new(0, 8, 0, y)
+    lbl.BackgroundTransparency = 1
+    lbl.TextColor3 = COL.text
+    lbl.Font = Enum.Font.Gotham
+    lbl.TextSize = 12
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.Text = name
+    lbl.Parent = frame
+
+    local box = Instance.new("TextBox")
+    box.Size = UDim2.new(0, 64, 0, 24)
+    box.Position = UDim2.new(1, -72, 0, y)
+    box.BackgroundColor3 = COL.box
+    box.BorderSizePixel = 0
+    box.TextColor3 = Color3.new(1, 1, 1)
+    box.PlaceholderText = "0"
+    box.Font = Enum.Font.GothamBold
+    box.TextSize = 12
+    box.ClearTextOnFocus = false
+    box.Text = tostring(CFG.MinRaceTime[key] or 0)
+    box.Parent = frame
+    corner(box, 5)
+
+    box.FocusLost:Connect(function()
+        local n = tonumber(box.Text)
+        if n and n >= 0 then
+            n = math.min(n, 600)
+            CFG.MinRaceTime[key] = n
+            box.Text = tostring(n)
+            log("Buffer for " .. name .. " set to " .. n .. "s")
+        else
+            box.Text = tostring(CFG.MinRaceTime[key] or 0) -- invalid input: put the old value back
+        end
+    end)
+end
+
+-- STATUS
+sectionHeader("STATUS", 228)
+local statusLabel = Instance.new("TextLabel")
+statusLabel.Size = UDim2.new(1, -16, 0, 52)
+statusLabel.Position = UDim2.new(0, 8, 0, 244)
+statusLabel.BackgroundTransparency = 1
+statusLabel.TextColor3 = COL.text
+statusLabel.Font = Enum.Font.Gotham
+statusLabel.TextSize = 11
+statusLabel.TextXAlignment = Enum.TextXAlignment.Left
+statusLabel.TextYAlignment = Enum.TextYAlignment.Top
+statusLabel.TextWrapped = true
+statusLabel.TextTruncate = Enum.TextTruncate.AtEnd
+statusLabel.Text = ""
+statusLabel.Parent = frame
+
+-- minimized icon (hidden until minimized)
+local icon = Instance.new("TextButton")
+icon.Size = UDim2.fromOffset(ICON_SIZE, ICON_SIZE)
+icon.Position = frame.Position
+icon.BackgroundColor3 = COL.bar
+icon.BorderSizePixel = 0
+icon.TextColor3 = Color3.new(1, 1, 1)
+icon.Font = Enum.Font.GothamBold
+icon.TextSize = 14
+icon.Text = "HF"
+icon.AutoButtonColor = true
+icon.Visible = false
+icon.Active = true
+icon.Parent = gui
+corner(icon, ICON_SIZE)
+
+local function refreshButtons()
+    btnQuest.Text = "Auto Quest: " .. (CFG.AutoQuest and "ON" or "OFF")
+    btnQuest.BackgroundColor3 = CFG.AutoQuest and COL.on or COL.off
+    btnRace.Text = "Auto Race: " .. (CFG.AutoRace and "ON" or "OFF")
+    btnRace.BackgroundColor3 = CFG.AutoRace and COL.on or COL.off
+    btnNudge.Text = "Nudge: " .. (CFG.Nudge and "ON" or "OFF")
+    btnNudge.BackgroundColor3 = CFG.Nudge and COL.optOn or COL.optOff
+    btnIdle.Text = "Anti-Idle: " .. (CFG.AntiIdle and "ON" or "OFF")
+    btnIdle.BackgroundColor3 = CFG.AntiIdle and COL.optOn or COL.optOff
+end
+refreshButtons()
+
+btnQuest.MouseButton1Click:Connect(function()
+    CFG.AutoQuest = not CFG.AutoQuest
+    refreshButtons()
+end)
+btnRace.MouseButton1Click:Connect(function()
+    CFG.AutoRace = not CFG.AutoRace
+    if CFG.AutoRace and state.raceText:find("stuck") then state.raceText = "waiting" end
+    refreshButtons()
+end)
+btnNudge.MouseButton1Click:Connect(function()
+    CFG.Nudge = not CFG.Nudge
+    refreshButtons()
+end)
+btnIdle.MouseButton1Click:Connect(function()
+    CFG.AntiIdle = not CFG.AntiIdle
+    refreshButtons()
+end)
+
+-- keep a GUI object fully on screen
+local function clampToScreen(obj, x, y)
+    local vp = gui.AbsoluteSize
+    local w, h = obj.AbsoluteSize.X, obj.AbsoluteSize.Y
+    x = math.clamp(x, 0, math.max(0, vp.X - w))
+    y = math.clamp(y, 0, math.max(0, vp.Y - h))
+    return x, y
+end
+
+-- drag `target` by grabbing `handle` (works with mouse and touch).
+-- onTap fires if the handle was pressed and released without really moving.
+local function makeDraggable(handle, target, onTap)
+    local dragInput, dragStart, startX, startY, moved
+    table.insert(conns, handle.InputBegan:Connect(function(input)
+        local t = input.UserInputType
+        if t == Enum.UserInputType.MouseButton1 or t == Enum.UserInputType.Touch then
+            dragInput = input
+            dragStart = input.Position
+            startX, startY = target.AbsolutePosition.X, target.AbsolutePosition.Y
+            moved = false
+        end
+    end))
+    table.insert(conns, UIS.InputChanged:Connect(function(input)
+        if not dragInput then return end
+        local isTouchMove = (input == dragInput and input.UserInputType == Enum.UserInputType.Touch)
+        local isMouseMove = (input.UserInputType == Enum.UserInputType.MouseMovement
+            and dragInput.UserInputType == Enum.UserInputType.MouseButton1)
+        if isTouchMove or isMouseMove then
+            local d = input.Position - dragStart
+            if d.Magnitude > 6 then moved = true end
+            if moved then
+                local x, y = clampToScreen(target, startX + d.X, startY + d.Y)
+                target.Position = UDim2.fromOffset(x, y)
+            end
+        end
+    end))
+    table.insert(conns, UIS.InputEnded:Connect(function(input)
+        if dragInput and (input == dragInput
+            or (input.UserInputType == Enum.UserInputType.MouseButton1
+                and dragInput.UserInputType == Enum.UserInputType.MouseButton1)) then
+            local wasTap = not moved
+            dragInput = nil
+            if wasTap and onTap then onTap() end
+        end
+    end))
+end
+
+makeDraggable(title, frame)
+
+-- minimize / restore. The icon and panel swap places so it comes back where you left it.
+local function minimize()
+    local x, y = clampToScreen(icon, frame.AbsolutePosition.X, frame.AbsolutePosition.Y)
+    icon.Position = UDim2.fromOffset(x, y)
+    frame.Visible = false
+    icon.Visible = true
+end
+
+local function restore()
+    local x, y = clampToScreen(frame, icon.AbsolutePosition.X, icon.AbsolutePosition.Y)
+    frame.Position = UDim2.fromOffset(x, y)
+    icon.Visible = false
+    frame.Visible = true
+end
+
+btnMin.MouseButton1Click:Connect(minimize)
+makeDraggable(icon, icon, restore)
+
+-- F6 = toggle Auto Quest + Auto Race together (keyboard only)
+table.insert(conns, UIS.InputBegan:Connect(function(input, processed)
+    if not processed and input.KeyCode == Enum.KeyCode.F6 then
+        local on = not (CFG.AutoQuest or CFG.AutoRace)
+        CFG.AutoQuest, CFG.AutoRace = on, on
+        refreshButtons()
+    end
+end))
+
+-- status text
+task.spawn(function()
+    while alive do
+        statusLabel.Text = "Quest: " .. state.questText
+            .. "\nRace: " .. state.raceText
+            .. "\nCompleted: " .. state.completed
+        task.wait(0.5)
+    end
+end)
+
+--------------------------------------------------------------------
+-- ANTI-IDLE
+--------------------------------------------------------------------
+local function pokeInput()
+    pcall(function()
+        VirtualUser:CaptureController()
+        VirtualUser:ClickButton2(Vector2.new())
+    end)
+end
+
+-- Roblox fires Idled after ~20 min without input; answer it
+table.insert(conns, LocalPlayer.Idled:Connect(function()
+    if CFG.AntiIdle then pokeInput() end
+end))
+
+-- backup: a poke every 2 minutes in case Idled doesn't fire on this executor
+task.spawn(function()
+    while alive do
+        task.wait(120)
+        if CFG.AntiIdle then pokeInput() end
+    end
+end)
+
+getgenv().HorseFarm = {
+    Stop = function()
+        alive = false
+        CFG.AutoQuest, CFG.AutoRace = false, false
+        for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
+        gui:Destroy()
+    end,
+}
+
+log("Loaded. Turn on Auto Quest and Auto Race.")
