@@ -1,0 +1,282 @@
+-- QTE Remote Spy (mobile friendly)
+-- Logs what your client SENDS ([OUT]) and what the server SENDS YOU ([IN]).
+-- Turn OFF the farm scripts first, then do each QTE by hand and copy the log.
+
+local RS = game:GetService("ReplicatedStorage")
+local UIS = game:GetService("UserInputService")
+
+-- stop any previous copy
+if getgenv().QTESpy and getgenv().QTESpy.Stop then
+    pcall(getgenv().QTESpy.Stop)
+end
+
+--------------------------------------------------------------------
+-- CONFIG
+--------------------------------------------------------------------
+local CFG = {
+    FilterQTE = true,   -- true: only log calls that mention "QTE". false: log everything
+    MaxLines = 300,     -- keeps the most recent lines
+}
+
+--------------------------------------------------------------------
+-- LOG BUFFER
+--------------------------------------------------------------------
+local alive = true
+local conns = {}
+local lines = {}
+local startTime = tick()
+local counter -- UI label, set later
+
+local function ser(v, depth)
+    depth = depth or 0
+    local t = typeof(v)
+    if t == "string" then return string.format("%q", v) end
+    if t == "table" then
+        if depth > 3 then return "{...}" end
+        local parts = {}
+        for k, val in pairs(v) do
+            table.insert(parts, "[" .. ser(k, depth + 1) .. "]=" .. ser(val, depth + 1))
+        end
+        return "{" .. table.concat(parts, ", ") .. "}"
+    end
+    if t == "Instance" then return "Instance<" .. v:GetFullName() .. ">" end
+    return tostring(v)
+end
+
+local function fmtArgs(args)
+    local out = {}
+    for i = 1, args.n do out[i] = ser(args[i]) end
+    return table.concat(out, ", ")
+end
+
+local function wanted(...)
+    if not CFG.FilterQTE then return true end
+    for _, text in ipairs({ ... }) do
+        if tostring(text):find("QTE", 1, true) then return true end
+    end
+    return false
+end
+
+local function addLine(line)
+    table.insert(lines, line)
+    if #lines > CFG.MaxLines then table.remove(lines, 1) end
+    print(line)
+    if counter then counter.Text = "Logged lines: " .. #lines end
+end
+
+local function stamp()
+    return ("%.2f"):format(tick() - startTime)
+end
+
+--------------------------------------------------------------------
+-- OUTGOING (client -> server)
+--------------------------------------------------------------------
+local hookOk = getgenv().QTESpyHooked == true
+
+-- the namecall hook is installed once per game session and just hands calls to whichever
+-- copy of the spy is currently running, so re-running the script never stacks hooks
+getgenv().QTESpyOut = function(self, method, args)
+    local text = fmtArgs(args)
+    if wanted(text, self.Name) then
+        addLine(("[%s] [OUT] %s:%s(%s)"):format(stamp(), self:GetFullName(), method, text))
+    end
+end
+
+if not hookOk then
+    if hookmetamethod and getnamecallmethod and newcclosure then
+        local old
+        old = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
+            local method = getnamecallmethod()
+            if (method == "FireServer" or method == "InvokeServer")
+                and typeof(self) == "Instance"
+                and (self:IsA("RemoteEvent") or self:IsA("RemoteFunction")) then
+                local handler = getgenv().QTESpyOut
+                if handler then
+                    local args = table.pack(...)
+                    task.spawn(handler, self, method, args)
+                end
+            end
+            return old(self, ...)
+        end))
+        getgenv().QTESpyHooked = true
+        hookOk = true
+    else
+        warn("[Spy] hookmetamethod not supported here - outgoing calls can't be logged")
+    end
+end
+
+--------------------------------------------------------------------
+-- INCOMING (server -> client)
+--------------------------------------------------------------------
+local hooked = 0
+for _, d in ipairs(RS:GetDescendants()) do
+    if d:IsA("RemoteEvent") then
+        table.insert(conns, d.OnClientEvent:Connect(function(...)
+            if not alive then return end
+            local args = table.pack(...)
+            local text = fmtArgs(args)
+            if wanted(text, d.Name) then
+                addLine(("[%s] [IN]  %s(%s)"):format(stamp(), d:GetFullName(), text))
+            end
+        end))
+        hooked += 1
+    end
+end
+
+--------------------------------------------------------------------
+-- UI
+--------------------------------------------------------------------
+local gui = Instance.new("ScreenGui")
+gui.Name = "QTESpyGui"
+gui.ResetOnSpawn = false
+gui.IgnoreGuiInset = true
+pcall(function() gui.Parent = (gethui and gethui()) or game:GetService("CoreGui") end)
+
+local function corner(obj, r)
+    local c = Instance.new("UICorner")
+    c.CornerRadius = UDim.new(0, r or 6)
+    c.Parent = obj
+end
+
+local frame = Instance.new("Frame")
+frame.Size = UDim2.fromOffset(200, 168)
+frame.Position = UDim2.fromOffset(16, 100)
+frame.BackgroundColor3 = Color3.fromRGB(26, 26, 33)
+frame.BorderSizePixel = 0
+frame.Active = true
+frame.ClipsDescendants = true
+frame.Parent = gui
+corner(frame, 10)
+
+local title = Instance.new("TextLabel")
+title.Size = UDim2.new(1, -30, 0, 26)
+title.BackgroundColor3 = Color3.fromRGB(52, 36, 82)
+title.BorderSizePixel = 0
+title.TextColor3 = Color3.new(1, 1, 1)
+title.Font = Enum.Font.GothamBold
+title.TextSize = 12
+title.Text = "QTE Spy (drag me)"
+title.Active = true
+title.Parent = frame
+
+local btnClose = Instance.new("TextButton")
+btnClose.Size = UDim2.new(0, 30, 0, 26)
+btnClose.Position = UDim2.new(1, -30, 0, 0)
+btnClose.BackgroundColor3 = Color3.fromRGB(150, 50, 50)
+btnClose.BorderSizePixel = 0
+btnClose.TextColor3 = Color3.new(1, 1, 1)
+btnClose.Font = Enum.Font.GothamBold
+btnClose.TextSize = 14
+btnClose.Text = "X"
+btnClose.Parent = frame
+
+local function makeButton(text, y)
+    local b = Instance.new("TextButton")
+    b.Size = UDim2.new(1, -16, 0, 30)
+    b.Position = UDim2.new(0, 8, 0, y)
+    b.BorderSizePixel = 0
+    b.TextColor3 = Color3.new(1, 1, 1)
+    b.Font = Enum.Font.GothamBold
+    b.TextSize = 12
+    b.Text = text
+    b.Parent = frame
+    corner(b, 6)
+    return b
+end
+
+local btnCopy = makeButton("Copy log", 34)
+btnCopy.BackgroundColor3 = Color3.fromRGB(45, 110, 160)
+local btnClear = makeButton("Clear log", 70)
+btnClear.BackgroundColor3 = Color3.fromRGB(80, 80, 92)
+local btnFilter = makeButton("", 106)
+
+counter = Instance.new("TextLabel")
+counter.Size = UDim2.new(1, -16, 0, 22)
+counter.Position = UDim2.new(0, 8, 0, 140)
+counter.BackgroundTransparency = 1
+counter.TextColor3 = Color3.fromRGB(215, 215, 225)
+counter.Font = Enum.Font.Gotham
+counter.TextSize = 11
+counter.TextXAlignment = Enum.TextXAlignment.Left
+counter.TextWrapped = true
+counter.Text = "Logged lines: 0"
+counter.Parent = frame
+
+local function refreshFilter()
+    btnFilter.Text = CFG.FilterQTE and "Filter: QTE only" or "Filter: EVERYTHING"
+    btnFilter.BackgroundColor3 = CFG.FilterQTE and Color3.fromRGB(46, 150, 80) or Color3.fromRGB(150, 110, 40)
+end
+refreshFilter()
+
+btnFilter.MouseButton1Click:Connect(function()
+    CFG.FilterQTE = not CFG.FilterQTE
+    refreshFilter()
+end)
+
+btnClear.MouseButton1Click:Connect(function()
+    lines = {}
+    counter.Text = "Logged lines: 0"
+end)
+
+btnCopy.MouseButton1Click:Connect(function()
+    local text = table.concat(lines, "\n")
+    if #lines == 0 then
+        counter.Text = "Nothing logged yet"
+        return
+    end
+    if setclipboard then
+        local ok = pcall(setclipboard, text)
+        counter.Text = ok and ("Copied " .. #lines .. " lines!") or "Copy failed - check console"
+    else
+        counter.Text = "No clipboard support - copy from the console"
+    end
+    if not setclipboard then print(text) end
+end)
+
+-- drag (mouse or touch), kept on screen
+do
+    local dragInput, dragStart, startX, startY
+    table.insert(conns, title.InputBegan:Connect(function(input)
+        local t = input.UserInputType
+        if t == Enum.UserInputType.MouseButton1 or t == Enum.UserInputType.Touch then
+            dragInput = input
+            dragStart = input.Position
+            startX, startY = frame.AbsolutePosition.X, frame.AbsolutePosition.Y
+        end
+    end))
+    table.insert(conns, UIS.InputChanged:Connect(function(input)
+        if not dragInput then return end
+        local touchMove = (input == dragInput and input.UserInputType == Enum.UserInputType.Touch)
+        local mouseMove = (input.UserInputType == Enum.UserInputType.MouseMovement
+            and dragInput.UserInputType == Enum.UserInputType.MouseButton1)
+        if touchMove or mouseMove then
+            local d = input.Position - dragStart
+            local vp = gui.AbsoluteSize
+            local x = math.clamp(startX + d.X, 0, math.max(0, vp.X - frame.AbsoluteSize.X))
+            local y = math.clamp(startY + d.Y, 0, math.max(0, vp.Y - frame.AbsoluteSize.Y))
+            frame.Position = UDim2.fromOffset(x, y)
+        end
+    end))
+    table.insert(conns, UIS.InputEnded:Connect(function(input)
+        if dragInput and (input == dragInput
+            or (input.UserInputType == Enum.UserInputType.MouseButton1
+                and dragInput.UserInputType == Enum.UserInputType.MouseButton1)) then
+            dragInput = nil
+        end
+    end))
+end
+
+getgenv().QTESpy = {
+    Stop = function()
+        alive = false
+        getgenv().QTESpyOut = nil
+        for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
+        gui:Destroy()
+    end,
+}
+
+btnClose.MouseButton1Click:Connect(function()
+    getgenv().QTESpy.Stop()
+end)
+
+print(("[Spy] Ready. Listening on %d incoming remotes. Outgoing hook: %s"):format(hooked, hookOk and "active" or "NOT available"))
