@@ -16,7 +16,7 @@ end
 -- CONFIG
 --------------------------------------------------------------------
 local CFG = {
-    FilterQTE = true,   -- true: only log calls that mention "QTE". false: log everything
+    HideNoise = true,   -- true: skip the spammy remotes listed in IGNORE below. false: log everything
     MaxLines = 300,     -- keeps the most recent lines
     PrintToConsole = false, -- printing every line to the console is slow on mobile; use Copy log instead
 }
@@ -58,7 +58,7 @@ local function fmtArgs(args)
 end
 
 local function wanted(...)
-    if not CFG.FilterQTE then return true end
+    if not CFG.HideNoise then return true end
     for _, text in ipairs({ ... }) do
         if tostring(text):find("QTE", 1, true) then return true end
     end
@@ -72,29 +72,17 @@ local function addLine(line)
     updateCounter()
 end
 
--- cheap check done BEFORE the (slow) full serialization: does this call mention "QTE"?
-local function quickMatch(name, args)
-    if not CFG.FilterQTE then return true end
-    if name:find("QTE", 1, true) then return true end
-    for i = 1, args.n do
-        local v = args[i]
-        local t = type(v)
-        if t == "string" then
-            if v:find("QTE", 1, true) then return true end
-        elseif t == "table" then
-            for k, val in pairs(v) do
-                if (type(k) == "string" and k:find("QTE", 1, true))
-                    or (type(val) == "string" and val:find("QTE", 1, true)) then
-                    return true
-                end
-            end
-        end
-    end
-    return false
-end
+-- remotes that fire constantly during fights and just bury the QTE lines
+local IGNORE = {
+    UpdateItems = true, UpdateBuffVisuals = true, UpdateSkills = true, UpdateSkillCDs = true,
+    DuskyClientRemote = true, MessageSent = true, UpdateTurnCount = true,
+    StartAction = true, EndAction = true, AttackIndicate = true,
+}
 
-local function stamp()
-    return ("%.2f"):format(tick() - startTime)
+-- cheap check done BEFORE the (slow) full serialization
+local function quickMatch(name, args)
+    if CFG.HideNoise and IGNORE[name] then return false end
+    return true
 end
 
 --------------------------------------------------------------------
@@ -222,13 +210,13 @@ counterLabel.Text = "Logged lines: 0"
 counterLabel.Parent = frame
 
 local function refreshFilter()
-    btnFilter.Text = CFG.FilterQTE and "Filter: QTE only" or "Filter: EVERYTHING"
-    btnFilter.BackgroundColor3 = CFG.FilterQTE and Color3.fromRGB(46, 150, 80) or Color3.fromRGB(150, 110, 40)
+    btnFilter.Text = CFG.HideNoise and "Filter: hide noise" or "Filter: EVERYTHING"
+    btnFilter.BackgroundColor3 = CFG.HideNoise and Color3.fromRGB(46, 150, 80) or Color3.fromRGB(150, 110, 40)
 end
 refreshFilter()
 
 btnFilter.MouseButton1Click:Connect(function()
-    CFG.FilterQTE = not CFG.FilterQTE
+    CFG.HideNoise = not CFG.HideNoise
     refreshFilter()
 end)
 
