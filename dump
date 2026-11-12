@@ -1,0 +1,150 @@
+-- QTE handler dumper
+-- Looks at the game's own client code that receives the dodge QTE message
+-- (Information.RemoteFunction) and copies what it finds, so we can see how the game replies.
+-- No hooks, nothing is sent to the server. Run once, then paste the result.
+
+local RS = game:GetService("ReplicatedStorage")
+
+local out = {}
+local function add(s) out[#out + 1] = tostring(s) end
+
+local function short(v)
+    local t = typeof(v)
+    if t == "string" then
+        return string.format("%q", #v > 80 and (v:sub(1, 80) .. "...") or v)
+    end
+    if t == "table" then
+        local n = 0
+        for _ in pairs(v) do n = n + 1 end
+        return "table(" .. n .. " entries)"
+    end
+    if t == "Instance" then return "Instance<" .. v:GetFullName() .. ">" end
+    return tostring(v) .. " (" .. t .. ")"
+end
+
+local seen = {}
+
+local function dumpFunction(fn, label, depth)
+    if seen[fn] then return end
+    seen[fn] = true
+    add("")
+    add("=== " .. label .. " ===")
+
+    if debug.getinfo then
+        local ok, info = pcall(debug.getinfo, fn)
+        if ok and type(info) == "table" then
+            add(("source=%s line=%s name=%s"):format(
+                tostring(info.short_src or info.source), tostring(info.linedefined), tostring(info.name)))
+        end
+    end
+
+    if debug.getconstants then
+        local ok, consts = pcall(debug.getconstants, fn)
+        if ok and type(consts) == "table" then
+            local parts, n = {}, 0
+            for _, c in pairs(consts) do
+                if type(c) == "string" or type(c) == "number" or type(c) == "boolean" then
+                    n = n + 1
+                    if n > 300 then break end
+                    parts[#parts + 1] = tostring(c)
+                end
+            end
+            add("constants: " .. table.concat(parts, " | "))
+        end
+    end
+
+    if debug.getupvalues then
+        local ok, ups = pcall(debug.getupvalues, fn)
+        if ok and type(ups) == "table" then
+            for i, v in pairs(ups) do
+                add(("upvalue[%s] = %s"):format(tostring(i), short(v)))
+                if type(v) == "function" and depth < 2 then
+                    dumpFunction(v, label .. " > upvalue " .. tostring(i), depth + 1)
+                end
+            end
+        end
+    end
+
+    if debug.getprotos and depth < 3 then
+        local ok, protos = pcall(debug.getprotos, fn)
+        if ok and type(protos) == "table" then
+            for i, p in pairs(protos) do
+                if type(p) == "function" then
+                    dumpFunction(p, label .. " > inner function " .. tostring(i), depth + 1)
+                end
+            end
+        end
+    end
+end
+
+local function dumpScriptSource(fn)
+    local scr
+    if getscriptfromfunction then
+        local ok, s = pcall(getscriptfromfunction, fn)
+        if ok then scr = s end
+    end
+    if not scr and getfenv then
+        local ok, env = pcall(getfenv, fn)
+        if ok and type(env) == "table" then scr = rawget(env, "script") end
+    end
+    if scr then
+        add("")
+        add("Script that owns this handler: " .. tostring(scr:GetFullName()))
+        if decompile then
+            local ok, src = pcall(decompile, scr)
+            if ok and type(src) == "string" then
+                if #src > 30000 then src = src:sub(1, 30000) .. "\n-- (cut off at 30000 chars)" end
+                add("--- decompiled ---")
+                add(src)
+            else
+                add("(decompile failed)")
+            end
+        else
+            add("(this executor has no decompile)")
+        end
+    end
+end
+
+local remote = RS:WaitForChild("Remotes"):WaitForChild("Information"):WaitForChild("RemoteFunction")
+add("Remote: " .. remote:GetFullName() .. " (" .. remote.ClassName .. ")")
+
+if remote:IsA("RemoteEvent") then
+    if getconnections then
+        local ok, conns = pcall(getconnections, remote.OnClientEvent)
+        if ok and type(conns) == "table" then
+            add("Handlers connected to OnClientEvent: " .. #conns)
+            for i, c in ipairs(conns) do
+                local okf, fn = pcall(function() return c.Function end)
+                if okf and type(fn) == "function" then
+                    dumpFunction(fn, "OnClientEvent handler #" .. i, 0)
+                    dumpScriptSource(fn)
+                else
+                    add("handler #" .. i .. ": function not readable")
+                end
+            end
+        else
+            add("getconnections failed: " .. tostring(conns))
+        end
+    else
+        add("This executor has no getconnections")
+    end
+elseif getcallbackvalue then
+    local ok, fn = pcall(getcallbackvalue, remote, "OnClientInvoke")
+    if ok and type(fn) == "function" then
+        dumpFunction(fn, "OnClientInvoke callback", 0)
+        dumpScriptSource(fn)
+    else
+        add("Could not read OnClientInvoke")
+    end
+else
+    add("This executor has no getcallbackvalue")
+end
+
+local text = table.concat(out, "\n")
+if setclipboard then
+    local ok = pcall(setclipboard, text)
+    print(("[Dump] %d characters %s"):format(#text, ok and "copied to clipboard" or "ready (clipboard failed)"))
+else
+    print("[Dump] No clipboard support - output below")
+    print(text)
+end
