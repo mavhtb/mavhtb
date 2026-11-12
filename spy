@@ -85,6 +85,10 @@ local function quickMatch(name, args)
     return true
 end
 
+local function stamp()
+    return ("%.2f"):format(tick() - startTime)
+end
+
 --------------------------------------------------------------------
 -- UI (built first so it always shows, even if hooking fails)
 --------------------------------------------------------------------
