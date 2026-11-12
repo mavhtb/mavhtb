@@ -1,150 +1,98 @@
--- QTE handler dumper
--- Looks at the game's own client code that receives the dodge QTE message
--- (Information.RemoteFunction) and copies what it finds, so we can see how the game replies.
--- No hooks, nothing is sent to the server. Run once, then paste the result.
+-- Targeted dump: only the parts of the game's client code that deal with the dodge QTE
+-- (Nonce / Glint / DodgeWindow / BlockWindow / Seed / Sweep / aliases), with a few lines around each.
+-- Nothing is sent to the server. Run once, then paste the result.
 
 local RS = game:GetService("ReplicatedStorage")
+
+local PATTERNS = {
+    "Nonce", "Glint", "DodgeWindow", "BlockWindow", "DodgeWidth", "Sweep", "Seed", "Layout",
+    "UIProfile", "applyAliases", "Alias", "alias",
+}
+local RADIUS = 14
+local MAX_CHARS = 16000
 
 local out = {}
 local function add(s) out[#out + 1] = tostring(s) end
 
-local function short(v)
-    local t = typeof(v)
-    if t == "string" then
-        return string.format("%q", #v > 80 and (v:sub(1, 80) .. "...") or v)
-    end
-    if t == "table" then
-        local n = 0
-        for _ in pairs(v) do n = n + 1 end
-        return "table(" .. n .. " entries)"
-    end
-    if t == "Instance" then return "Instance<" .. v:GetFullName() .. ">" end
-    return tostring(v) .. " (" .. t .. ")"
-end
+local function windows(src)
+    local lines = {}
+    for l in (src .. "\n"):gmatch("(.-)\n") do lines[#lines + 1] = l end
 
-local seen = {}
-
-local function dumpFunction(fn, label, depth)
-    if seen[fn] then return end
-    seen[fn] = true
-    add("")
-    add("=== " .. label .. " ===")
-
-    if debug.getinfo then
-        local ok, info = pcall(debug.getinfo, fn)
-        if ok and type(info) == "table" then
-            add(("source=%s line=%s name=%s"):format(
-                tostring(info.short_src or info.source), tostring(info.linedefined), tostring(info.name)))
-        end
-    end
-
-    if debug.getconstants then
-        local ok, consts = pcall(debug.getconstants, fn)
-        if ok and type(consts) == "table" then
-            local parts, n = {}, 0
-            for _, c in pairs(consts) do
-                if type(c) == "string" or type(c) == "number" or type(c) == "boolean" then
-                    n = n + 1
-                    if n > 300 then break end
-                    parts[#parts + 1] = tostring(c)
-                end
-            end
-            add("constants: " .. table.concat(parts, " | "))
-        end
-    end
-
-    if debug.getupvalues then
-        local ok, ups = pcall(debug.getupvalues, fn)
-        if ok and type(ups) == "table" then
-            for i, v in pairs(ups) do
-                add(("upvalue[%s] = %s"):format(tostring(i), short(v)))
-                if type(v) == "function" and depth < 2 then
-                    dumpFunction(v, label .. " > upvalue " .. tostring(i), depth + 1)
-                end
+    local keep, hits = {}, 0
+    for i, l in ipairs(lines) do
+        for _, p in ipairs(PATTERNS) do
+            if l:find(p, 1, true) then
+                hits = hits + 1
+                for j = math.max(1, i - RADIUS), math.min(#lines, i + RADIUS) do keep[j] = true end
+                break
             end
         end
     end
 
-    if debug.getprotos and depth < 3 then
-        local ok, protos = pcall(debug.getprotos, fn)
-        if ok and type(protos) == "table" then
-            for i, p in pairs(protos) do
-                if type(p) == "function" then
-                    dumpFunction(p, label .. " > inner function " .. tostring(i), depth + 1)
-                end
-            end
+    local parts, last = {}, 0
+    for i = 1, #lines do
+        if keep[i] then
+            if i > last + 1 then parts[#parts + 1] = "-- ..." end
+            parts[#parts + 1] = ("%d: %s"):format(i, lines[i])
+            last = i
         end
     end
-end
-
-local function dumpScriptSource(fn)
-    local scr
-    if getscriptfromfunction then
-        local ok, s = pcall(getscriptfromfunction, fn)
-        if ok then scr = s end
-    end
-    if not scr and getfenv then
-        local ok, env = pcall(getfenv, fn)
-        if ok and type(env) == "table" then scr = rawget(env, "script") end
-    end
-    if scr then
-        add("")
-        add("Script that owns this handler: " .. tostring(scr:GetFullName()))
-        if decompile then
-            local ok, src = pcall(decompile, scr)
-            if ok and type(src) == "string" then
-                if #src > 30000 then src = src:sub(1, 30000) .. "\n-- (cut off at 30000 chars)" end
-                add("--- decompiled ---")
-                add(src)
-            else
-                add("(decompile failed)")
-            end
-        else
-            add("(this executor has no decompile)")
-        end
-    end
+    return table.concat(parts, "\n"), #lines, hits
 end
 
 local remote = RS:WaitForChild("Remotes"):WaitForChild("Information"):WaitForChild("RemoteFunction")
 add("Remote: " .. remote:GetFullName() .. " (" .. remote.ClassName .. ")")
 
-if remote:IsA("RemoteEvent") then
-    if getconnections then
-        local ok, conns = pcall(getconnections, remote.OnClientEvent)
-        if ok and type(conns) == "table" then
-            add("Handlers connected to OnClientEvent: " .. #conns)
-            for i, c in ipairs(conns) do
-                local okf, fn = pcall(function() return c.Function end)
-                if okf and type(fn) == "function" then
-                    dumpFunction(fn, "OnClientEvent handler #" .. i, 0)
-                    dumpScriptSource(fn)
-                else
-                    add("handler #" .. i .. ": function not readable")
+if not (getconnections and decompile) then
+    add("This executor is missing getconnections or decompile")
+else
+    local scripts, seenScript = {}, {}
+    local ok, conns = pcall(getconnections, remote.OnClientEvent)
+    if ok and type(conns) == "table" then
+        for _, c in ipairs(conns) do
+            local okf, fn = pcall(function() return c.Function end)
+            if okf and type(fn) == "function" then
+                local scr
+                if getscriptfromfunction then
+                    local ok2, s = pcall(getscriptfromfunction, fn)
+                    if ok2 then scr = s end
+                end
+                if not scr and getfenv then
+                    local ok2, env = pcall(getfenv, fn)
+                    if ok2 and type(env) == "table" then scr = rawget(env, "script") end
+                end
+                if scr and not seenScript[scr] then
+                    seenScript[scr] = true
+                    scripts[#scripts + 1] = scr
                 end
             end
-        else
-            add("getconnections failed: " .. tostring(conns))
         end
-    else
-        add("This executor has no getconnections")
     end
-elseif getcallbackvalue then
-    local ok, fn = pcall(getcallbackvalue, remote, "OnClientInvoke")
-    if ok and type(fn) == "function" then
-        dumpFunction(fn, "OnClientInvoke callback", 0)
-        dumpScriptSource(fn)
-    else
-        add("Could not read OnClientInvoke")
+
+    add("Scripts with handlers on this remote: " .. #scripts)
+    for _, scr in ipairs(scripts) do
+        add("")
+        add("##### " .. scr:GetFullName())
+        local okd, src = pcall(decompile, scr)
+        if okd and type(src) == "string" then
+            local text, total, hits = windows(src)
+            add(("(%d lines, %d matching lines)"):format(total, hits))
+            if hits > 0 then add(text) end
+        else
+            add("(decompile failed)")
+        end
     end
-else
-    add("This executor has no getcallbackvalue")
 end
 
 local text = table.concat(out, "\n")
+if #text > MAX_CHARS then
+    text = text:sub(1, MAX_CHARS) .. "\n-- (cut off at " .. MAX_CHARS .. " chars)"
+end
+
 if setclipboard then
     local ok = pcall(setclipboard, text)
-    print(("[Dump] %d characters %s"):format(#text, ok and "copied to clipboard" or "ready (clipboard failed)"))
+    print(("[Dump2] %d characters %s"):format(#text, ok and "copied to clipboard" or "ready (clipboard failed)"))
 else
-    print("[Dump] No clipboard support - output below")
+    print("[Dump2] No clipboard support - output below")
     print(text)
 end
