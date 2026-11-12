@@ -18,6 +18,7 @@ end
 local CFG = {
     FilterQTE = true,   -- true: only log calls that mention "QTE". false: log everything
     MaxLines = 300,     -- keeps the most recent lines
+    PrintToConsole = false, -- printing every line to the console is slow on mobile; use Copy log instead
 }
 
 --------------------------------------------------------------------
@@ -28,7 +29,7 @@ local conns = {}
 local lines = {}
 local startTime = tick()
 local counterLabel, hookLabel -- UI labels, set below
-local hookText = "Outgoing hook: starting..."
+local hookText = "Outgoing: OFF (tap Hook A or B)"
 
 local function updateCounter()
     if counterLabel then counterLabel.Text = "Logged lines: " .. #lines end
@@ -67,8 +68,29 @@ end
 local function addLine(line)
     table.insert(lines, line)
     if #lines > CFG.MaxLines then table.remove(lines, 1) end
-    print(line)
+    if CFG.PrintToConsole then print(line) end
     updateCounter()
+end
+
+-- cheap check done BEFORE the (slow) full serialization: does this call mention "QTE"?
+local function quickMatch(name, args)
+    if not CFG.FilterQTE then return true end
+    if name:find("QTE", 1, true) then return true end
+    for i = 1, args.n do
+        local v = args[i]
+        local t = type(v)
+        if t == "string" then
+            if v:find("QTE", 1, true) then return true end
+        elseif t == "table" then
+            for k, val in pairs(v) do
+                if (type(k) == "string" and k:find("QTE", 1, true))
+                    or (type(val) == "string" and val:find("QTE", 1, true)) then
+                    return true
+                end
+            end
+        end
+    end
+    return false
 end
 
 local function stamp()
@@ -107,7 +129,7 @@ local function corner(obj, r)
 end
 
 local frame = Instance.new("Frame")
-frame.Size = UDim2.fromOffset(200, 190)
+frame.Size = UDim2.fromOffset(200, 228)
 frame.Position = UDim2.fromOffset(16, 100)
 frame.BackgroundColor3 = Color3.fromRGB(26, 26, 33)
 frame.BorderSizePixel = 0
@@ -158,9 +180,25 @@ local btnClear = makeButton("Clear log", 70)
 btnClear.BackgroundColor3 = Color3.fromRGB(80, 80, 92)
 local btnFilter = makeButton("", 106)
 
+local function halfButton(side, y)
+    local b = Instance.new("TextButton")
+    b.Size = UDim2.new(0.5, -12, 0, 30)
+    b.Position = side == 0 and UDim2.new(0, 8, 0, y) or UDim2.new(0.5, 4, 0, y)
+    b.BorderSizePixel = 0
+    b.TextColor3 = Color3.new(1, 1, 1)
+    b.Font = Enum.Font.GothamBold
+    b.TextSize = 12
+    b.Text = ""
+    b.Parent = frame
+    corner(b, 6)
+    return b
+end
+local btnHookA = halfButton(0, 142)
+local btnHookB = halfButton(1, 142)
+
 hookLabel = Instance.new("TextLabel")
 hookLabel.Size = UDim2.new(1, -16, 0, 16)
-hookLabel.Position = UDim2.new(0, 8, 0, 142)
+hookLabel.Position = UDim2.new(0, 8, 0, 178)
 hookLabel.BackgroundTransparency = 1
 hookLabel.TextColor3 = Color3.fromRGB(215, 215, 225)
 hookLabel.Font = Enum.Font.Gotham
@@ -171,8 +209,8 @@ hookLabel.Text = hookText
 hookLabel.Parent = frame
 
 counterLabel = Instance.new("TextLabel")
-counterLabel.Size = UDim2.new(1, -16, 0, 32)
-counterLabel.Position = UDim2.new(0, 8, 0, 158)
+counterLabel.Size = UDim2.new(1, -16, 0, 30)
+counterLabel.Position = UDim2.new(0, 8, 0, 196)
 counterLabel.BackgroundTransparency = 1
 counterLabel.TextColor3 = Color3.fromRGB(215, 215, 225)
 counterLabel.Font = Enum.Font.Gotham
@@ -263,51 +301,100 @@ end)
 print("[Spy] Panel created. Setting up hooks...")
 
 --------------------------------------------------------------------
--- OUTGOING (client -> server)
+-- OUTGOING (client -> server) - OFF until you tap a hook button
 --------------------------------------------------------------------
 local function setHookText(t)
     hookText = t
     if hookLabel then hookLabel.Text = t end
 end
 
--- the namecall hook is installed once per game session and just hands calls to whichever
--- copy of the spy is currently running, so re-running the script never stacks hooks
+-- hooks stay installed until you rejoin the game, so they hand calls to whichever copy of
+-- the spy is running (getgenv().QTESpyOut). Re-running the script never stacks them.
 getgenv().QTESpyOut = function(self, method, args)
-    local text = fmtArgs(args)
-    if wanted(text, self.Name) then
-        addLine(("[%s] [OUT] %s:%s(%s)"):format(stamp(), self:GetFullName(), method, text))
+    if quickMatch(self.Name, args) then
+        addLine(("[%s] [OUT] %s:%s(%s)"):format(stamp(), self:GetFullName(), method, fmtArgs(args)))
     end
 end
 
-if getgenv().QTESpyHooked then
-    setHookText("Outgoing hook: active")
-else
+-- Hook A: __namecall hook (catches remote:FireServer(...) style calls)
+local function installA()
+    if getgenv().QTESpyHooked then return true end
     local ok, err = pcall(function()
         assert(hookmetamethod and getnamecallmethod and newcclosure,
             "executor is missing hookmetamethod/getnamecallmethod/newcclosure")
         local old
         old = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
             local method = getnamecallmethod()
-            if (method == "FireServer" or method == "InvokeServer")
-                and typeof(self) == "Instance"
-                and (self:IsA("RemoteEvent") or self:IsA("RemoteFunction")) then
+            if (method == "FireServer" or method == "InvokeServer") and typeof(self) == "Instance" then
                 local handler = getgenv().QTESpyOut
                 if handler then
-                    local args = table.pack(...)
-                    task.spawn(handler, self, method, args)
+                    task.spawn(handler, self, method, table.pack(...))
                 end
             end
             return old(self, ...)
         end))
     end)
-    if ok then
-        getgenv().QTESpyHooked = true
-        setHookText("Outgoing hook: active")
-    else
-        warn("[Spy] Outgoing hook failed: " .. tostring(err))
-        setHookText("Outgoing hook: FAILED (IN only)")
-    end
+    if ok then getgenv().QTESpyHooked = true else warn("[Spy] Hook A failed: " .. tostring(err)) end
+    return ok
 end
+
+-- Hook B: hooks FireServer / InvokeServer directly. Lighter on the rest of the game.
+local function installB()
+    if getgenv().QTESpyHookedB then return true end
+    local ok, err = pcall(function()
+        assert(hookfunction and newcclosure, "executor is missing hookfunction/newcclosure")
+        local re = Instance.new("RemoteEvent")
+        local rf = Instance.new("RemoteFunction")
+        local oldFire, oldInvoke
+        oldFire = hookfunction(re.FireServer, newcclosure(function(self, ...)
+            local handler = getgenv().QTESpyOut
+            if handler and typeof(self) == "Instance" then
+                task.spawn(handler, self, "FireServer", table.pack(...))
+            end
+            return oldFire(self, ...)
+        end))
+        oldInvoke = hookfunction(rf.InvokeServer, newcclosure(function(self, ...)
+            local handler = getgenv().QTESpyOut
+            if handler and typeof(self) == "Instance" then
+                task.spawn(handler, self, "InvokeServer", table.pack(...))
+            end
+            return oldInvoke(self, ...)
+        end))
+    end)
+    if ok then getgenv().QTESpyHookedB = true else warn("[Spy] Hook B failed: " .. tostring(err)) end
+    return ok
+end
+
+local function updateHookButtons()
+    local a, b = getgenv().QTESpyHooked, getgenv().QTESpyHookedB
+    btnHookA.Text = "Hook A: " .. (a and "ON" or "OFF")
+    btnHookA.BackgroundColor3 = a and Color3.fromRGB(46, 150, 80) or Color3.fromRGB(80, 80, 92)
+    btnHookB.Text = "Hook B: " .. (b and "ON" or "OFF")
+    btnHookB.BackgroundColor3 = b and Color3.fromRGB(46, 150, 80) or Color3.fromRGB(80, 80, 92)
+end
+
+if getgenv().QTESpyHooked or getgenv().QTESpyHookedB then
+    setHookText("Outgoing: a hook is already active")
+end
+updateHookButtons()
+
+btnHookA.MouseButton1Click:Connect(function()
+    if getgenv().QTESpyHooked then return end
+    setHookText("Installing hook A...")
+    task.wait(0.1)
+    local ok = installA()
+    setHookText(ok and "Outgoing: hook A active" or "Hook A failed (see console)")
+    updateHookButtons()
+end)
+
+btnHookB.MouseButton1Click:Connect(function()
+    if getgenv().QTESpyHookedB then return end
+    setHookText("Installing hook B...")
+    task.wait(0.1)
+    local ok = installB()
+    setHookText(ok and "Outgoing: hook B active" or "Hook B failed (see console)")
+    updateHookButtons()
+end)
 
 --------------------------------------------------------------------
 -- INCOMING (server -> client)
@@ -319,9 +406,8 @@ pcall(function()
             table.insert(conns, d.OnClientEvent:Connect(function(...)
                 if not alive then return end
                 local args = table.pack(...)
-                local text = fmtArgs(args)
-                if wanted(text, d.Name) then
-                    addLine(("[%s] [IN]  %s(%s)"):format(stamp(), d:GetFullName(), text))
+                if quickMatch(d.Name, args) then
+                    addLine(("[%s] [IN]  %s(%s)"):format(stamp(), d:GetFullName(), fmtArgs(args)))
                 end
             end))
             hooked = hooked + 1
