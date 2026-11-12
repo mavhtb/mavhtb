@@ -1,3 +1,6 @@
+--[[
+	WARNING: Heads up! This script has not been verified by ScriptBlox. Use at your own risk!
+]]
 -- Arcane Lineage | Halloween Horse Race Farm (Potassium)
 -- Auto Quest : clicks the Horse Race paper on the quest board when no quest is active
 -- Auto Race  : teleports through every gate in order and fires the game's own gate remote
@@ -357,7 +360,7 @@ corner(frame, 10)
 
 -- title bar (drag handle) + minimize button
 local title = Instance.new("TextLabel")
-title.Size = UDim2.new(1, -30, 0, 26)
+title.Size = UDim2.new(1, -58, 0, 26)
 title.BackgroundColor3 = COL.bar
 title.BorderSizePixel = 0
 title.TextColor3 = Color3.new(1, 1, 1)
@@ -368,8 +371,8 @@ title.Active = true
 title.Parent = frame
 
 local btnMin = Instance.new("TextButton")
-btnMin.Size = UDim2.new(0, 30, 0, 26)
-btnMin.Position = UDim2.new(1, -30, 0, 0)
+btnMin.Size = UDim2.new(0, 28, 0, 26)
+btnMin.Position = UDim2.new(1, -58, 0, 0)
 btnMin.BackgroundColor3 = COL.barBtn
 btnMin.BorderSizePixel = 0
 btnMin.TextColor3 = Color3.new(1, 1, 1)
@@ -377,6 +380,17 @@ btnMin.Font = Enum.Font.GothamBold
 btnMin.TextSize = 16
 btnMin.Text = "-"
 btnMin.Parent = frame
+
+local btnClose = Instance.new("TextButton")
+btnClose.Size = UDim2.new(0, 30, 0, 26)
+btnClose.Position = UDim2.new(1, -30, 0, 0)
+btnClose.BackgroundColor3 = Color3.fromRGB(150, 50, 50)
+btnClose.BorderSizePixel = 0
+btnClose.TextColor3 = Color3.new(1, 1, 1)
+btnClose.Font = Enum.Font.GothamBold
+btnClose.TextSize = 14
+btnClose.Text = "X"
+btnClose.Parent = frame
 
 local function sectionHeader(text, y)
     local l = Instance.new("TextLabel")
@@ -485,8 +499,9 @@ icon.BackgroundColor3 = COL.bar
 icon.BorderSizePixel = 0
 icon.TextColor3 = Color3.new(1, 1, 1)
 icon.Font = Enum.Font.GothamBold
-icon.TextSize = 14
-icon.Text = "HF"
+icon.TextSize = 22
+icon.TextColor3 = Color3.fromRGB(255, 105, 150)
+icon.Text = "♥"
 icon.AutoButtonColor = true
 icon.Visible = false
 icon.Active = true
@@ -588,6 +603,10 @@ local function restore()
 end
 
 btnMin.MouseButton1Click:Connect(minimize)
+btnClose.MouseButton1Click:Connect(function()
+    local hf = getgenv().HorseFarm
+    if hf and hf.Stop then hf.Stop() end
+end)
 makeDraggable(icon, icon, restore)
 
 -- F6 = toggle Auto Quest + Auto Race together (keyboard only)
