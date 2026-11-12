@@ -2,8 +2,10 @@
 -- Logs what your client SENDS ([OUT]) and what the server SENDS YOU ([IN]).
 -- Turn OFF the farm scripts first, then do each QTE by hand and copy the log.
 
+local Players = game:GetService("Players")
 local RS = game:GetService("ReplicatedStorage")
 local UIS = game:GetService("UserInputService")
+local LocalPlayer = Players.LocalPlayer
 
 -- stop any previous copy
 if getgenv().QTESpy and getgenv().QTESpy.Stop then
@@ -25,7 +27,12 @@ local alive = true
 local conns = {}
 local lines = {}
 local startTime = tick()
-local counter -- UI label, set later
+local counterLabel, hookLabel -- UI labels, set below
+local hookText = "Outgoing hook: starting..."
+
+local function updateCounter()
+    if counterLabel then counterLabel.Text = "Logged lines: " .. #lines end
+end
 
 local function ser(v, depth)
     depth = depth or 0
@@ -61,7 +68,7 @@ local function addLine(line)
     table.insert(lines, line)
     if #lines > CFG.MaxLines then table.remove(lines, 1) end
     print(line)
-    if counter then counter.Text = "Logged lines: " .. #lines end
+    updateCounter()
 end
 
 local function stamp()
@@ -69,68 +76,29 @@ local function stamp()
 end
 
 --------------------------------------------------------------------
--- OUTGOING (client -> server)
---------------------------------------------------------------------
-local hookOk = getgenv().QTESpyHooked == true
-
--- the namecall hook is installed once per game session and just hands calls to whichever
--- copy of the spy is currently running, so re-running the script never stacks hooks
-getgenv().QTESpyOut = function(self, method, args)
-    local text = fmtArgs(args)
-    if wanted(text, self.Name) then
-        addLine(("[%s] [OUT] %s:%s(%s)"):format(stamp(), self:GetFullName(), method, text))
-    end
-end
-
-if not hookOk then
-    if hookmetamethod and getnamecallmethod and newcclosure then
-        local old
-        old = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
-            local method = getnamecallmethod()
-            if (method == "FireServer" or method == "InvokeServer")
-                and typeof(self) == "Instance"
-                and (self:IsA("RemoteEvent") or self:IsA("RemoteFunction")) then
-                local handler = getgenv().QTESpyOut
-                if handler then
-                    local args = table.pack(...)
-                    task.spawn(handler, self, method, args)
-                end
-            end
-            return old(self, ...)
-        end))
-        getgenv().QTESpyHooked = true
-        hookOk = true
-    else
-        warn("[Spy] hookmetamethod not supported here - outgoing calls can't be logged")
-    end
-end
-
---------------------------------------------------------------------
--- INCOMING (server -> client)
---------------------------------------------------------------------
-local hooked = 0
-for _, d in ipairs(RS:GetDescendants()) do
-    if d:IsA("RemoteEvent") then
-        table.insert(conns, d.OnClientEvent:Connect(function(...)
-            if not alive then return end
-            local args = table.pack(...)
-            local text = fmtArgs(args)
-            if wanted(text, d.Name) then
-                addLine(("[%s] [IN]  %s(%s)"):format(stamp(), d:GetFullName(), text))
-            end
-        end))
-        hooked += 1
-    end
-end
-
---------------------------------------------------------------------
--- UI
+-- UI (built first so it always shows, even if hooking fails)
 --------------------------------------------------------------------
 local gui = Instance.new("ScreenGui")
 gui.Name = "QTESpyGui"
 gui.ResetOnSpawn = false
 gui.IgnoreGuiInset = true
-pcall(function() gui.Parent = (gethui and gethui()) or game:GetService("CoreGui") end)
+gui.DisplayOrder = 999
+gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+
+local function tryParent(getParent)
+    local ok, parent = pcall(getParent)
+    if ok and parent then
+        local ok2 = pcall(function() gui.Parent = parent end)
+        return ok2 and gui.Parent ~= nil
+    end
+    return false
+end
+
+if not (gethui and tryParent(gethui))
+    and not tryParent(function() return game:GetService("CoreGui") end)
+    and not tryParent(function() return LocalPlayer:WaitForChild("PlayerGui", 5) end) then
+    warn("[Spy] Could not parent the panel anywhere - output will only go to the console")
+end
 
 local function corner(obj, r)
     local c = Instance.new("UICorner")
@@ -139,7 +107,7 @@ local function corner(obj, r)
 end
 
 local frame = Instance.new("Frame")
-frame.Size = UDim2.fromOffset(200, 168)
+frame.Size = UDim2.fromOffset(200, 190)
 frame.Position = UDim2.fromOffset(16, 100)
 frame.BackgroundColor3 = Color3.fromRGB(26, 26, 33)
 frame.BorderSizePixel = 0
@@ -190,17 +158,30 @@ local btnClear = makeButton("Clear log", 70)
 btnClear.BackgroundColor3 = Color3.fromRGB(80, 80, 92)
 local btnFilter = makeButton("", 106)
 
-counter = Instance.new("TextLabel")
-counter.Size = UDim2.new(1, -16, 0, 22)
-counter.Position = UDim2.new(0, 8, 0, 140)
-counter.BackgroundTransparency = 1
-counter.TextColor3 = Color3.fromRGB(215, 215, 225)
-counter.Font = Enum.Font.Gotham
-counter.TextSize = 11
-counter.TextXAlignment = Enum.TextXAlignment.Left
-counter.TextWrapped = true
-counter.Text = "Logged lines: 0"
-counter.Parent = frame
+hookLabel = Instance.new("TextLabel")
+hookLabel.Size = UDim2.new(1, -16, 0, 16)
+hookLabel.Position = UDim2.new(0, 8, 0, 142)
+hookLabel.BackgroundTransparency = 1
+hookLabel.TextColor3 = Color3.fromRGB(215, 215, 225)
+hookLabel.Font = Enum.Font.Gotham
+hookLabel.TextSize = 11
+hookLabel.TextXAlignment = Enum.TextXAlignment.Left
+hookLabel.TextTruncate = Enum.TextTruncate.AtEnd
+hookLabel.Text = hookText
+hookLabel.Parent = frame
+
+counterLabel = Instance.new("TextLabel")
+counterLabel.Size = UDim2.new(1, -16, 0, 32)
+counterLabel.Position = UDim2.new(0, 8, 0, 158)
+counterLabel.BackgroundTransparency = 1
+counterLabel.TextColor3 = Color3.fromRGB(215, 215, 225)
+counterLabel.Font = Enum.Font.Gotham
+counterLabel.TextSize = 11
+counterLabel.TextXAlignment = Enum.TextXAlignment.Left
+counterLabel.TextYAlignment = Enum.TextYAlignment.Top
+counterLabel.TextWrapped = true
+counterLabel.Text = "Logged lines: 0"
+counterLabel.Parent = frame
 
 local function refreshFilter()
     btnFilter.Text = CFG.FilterQTE and "Filter: QTE only" or "Filter: EVERYTHING"
@@ -215,22 +196,22 @@ end)
 
 btnClear.MouseButton1Click:Connect(function()
     lines = {}
-    counter.Text = "Logged lines: 0"
+    updateCounter()
 end)
 
 btnCopy.MouseButton1Click:Connect(function()
-    local text = table.concat(lines, "\n")
     if #lines == 0 then
-        counter.Text = "Nothing logged yet"
+        counterLabel.Text = "Nothing logged yet"
         return
     end
+    local text = table.concat(lines, "\n")
     if setclipboard then
         local ok = pcall(setclipboard, text)
-        counter.Text = ok and ("Copied " .. #lines .. " lines!") or "Copy failed - check console"
+        counterLabel.Text = ok and ("Copied " .. #lines .. " lines!") or "Copy failed - check console"
     else
-        counter.Text = "No clipboard support - copy from the console"
+        counterLabel.Text = "No clipboard support - copy from the console"
+        print(text)
     end
-    if not setclipboard then print(text) end
 end)
 
 -- drag (mouse or touch), kept on screen
@@ -279,4 +260,73 @@ btnClose.MouseButton1Click:Connect(function()
     getgenv().QTESpy.Stop()
 end)
 
-print(("[Spy] Ready. Listening on %d incoming remotes. Outgoing hook: %s"):format(hooked, hookOk and "active" or "NOT available"))
+print("[Spy] Panel created. Setting up hooks...")
+
+--------------------------------------------------------------------
+-- OUTGOING (client -> server)
+--------------------------------------------------------------------
+local function setHookText(t)
+    hookText = t
+    if hookLabel then hookLabel.Text = t end
+end
+
+-- the namecall hook is installed once per game session and just hands calls to whichever
+-- copy of the spy is currently running, so re-running the script never stacks hooks
+getgenv().QTESpyOut = function(self, method, args)
+    local text = fmtArgs(args)
+    if wanted(text, self.Name) then
+        addLine(("[%s] [OUT] %s:%s(%s)"):format(stamp(), self:GetFullName(), method, text))
+    end
+end
+
+if getgenv().QTESpyHooked then
+    setHookText("Outgoing hook: active")
+else
+    local ok, err = pcall(function()
+        assert(hookmetamethod and getnamecallmethod and newcclosure,
+            "executor is missing hookmetamethod/getnamecallmethod/newcclosure")
+        local old
+        old = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
+            local method = getnamecallmethod()
+            if (method == "FireServer" or method == "InvokeServer")
+                and typeof(self) == "Instance"
+                and (self:IsA("RemoteEvent") or self:IsA("RemoteFunction")) then
+                local handler = getgenv().QTESpyOut
+                if handler then
+                    local args = table.pack(...)
+                    task.spawn(handler, self, method, args)
+                end
+            end
+            return old(self, ...)
+        end))
+    end)
+    if ok then
+        getgenv().QTESpyHooked = true
+        setHookText("Outgoing hook: active")
+    else
+        warn("[Spy] Outgoing hook failed: " .. tostring(err))
+        setHookText("Outgoing hook: FAILED (IN only)")
+    end
+end
+
+--------------------------------------------------------------------
+-- INCOMING (server -> client)
+--------------------------------------------------------------------
+local hooked = 0
+pcall(function()
+    for _, d in ipairs(RS:GetDescendants()) do
+        if d:IsA("RemoteEvent") then
+            table.insert(conns, d.OnClientEvent:Connect(function(...)
+                if not alive then return end
+                local args = table.pack(...)
+                local text = fmtArgs(args)
+                if wanted(text, d.Name) then
+                    addLine(("[%s] [IN]  %s(%s)"):format(stamp(), d:GetFullName(), text))
+                end
+            end))
+            hooked = hooked + 1
+        end
+    end
+end)
+
+print(("[Spy] Ready. Listening on %d incoming remotes. %s"):format(hooked, hookText))
