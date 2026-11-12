@@ -1,98 +1,264 @@
--- Targeted dump: only the parts of the game's client code that deal with the dodge QTE
--- (Nonce / Glint / DodgeWindow / BlockWindow / Seed / Sweep / aliases), with a few lines around each.
--- Nothing is sent to the server. Run once, then paste the result.
+-- Dump 3 (all QTEs): decompiles every module inside CombatHandle (Dodge, Sword, Axe, Lockpick...)
+-- plus the end of CombatHandle (how it sends replies). The result is split into parts small
+-- enough to paste into chat. A small panel lets you tap "Copy part N" for each one.
+-- Nothing is sent to the server.
 
+local Players = game:GetService("Players")
 local RS = game:GetService("ReplicatedStorage")
+local LocalPlayer = Players.LocalPlayer
 
-local PATTERNS = {
-    "Nonce", "Glint", "DodgeWindow", "BlockWindow", "DodgeWidth", "Sweep", "Seed", "Layout",
-    "UIProfile", "applyAliases", "Alias", "alias",
-}
-local RADIUS = 14
-local MAX_CHARS = 16000
+local CAP = 20000        -- max characters per part
+local TAIL_LINES = 50    -- lines kept from the end of CombatHandle
 
-local out = {}
-local function add(s) out[#out + 1] = tostring(s) end
+-- close any earlier copy
+if getgenv().QTEDump3 then pcall(function() getgenv().QTEDump3:Destroy() end) end
 
-local function windows(src)
+--------------------------------------------------------------------
+-- PANEL
+--------------------------------------------------------------------
+local gui = Instance.new("ScreenGui")
+gui.Name = "QTEDump3Gui"
+gui.ResetOnSpawn = false
+gui.IgnoreGuiInset = true
+gui.DisplayOrder = 999
+
+local function tryParent(getParent)
+    local ok, parent = pcall(getParent)
+    if ok and parent then
+        local ok2 = pcall(function() gui.Parent = parent end)
+        return ok2 and gui.Parent ~= nil
+    end
+    return false
+end
+if not (gethui and tryParent(gethui))
+    and not tryParent(function() return game:GetService("CoreGui") end)
+    and not tryParent(function() return LocalPlayer:WaitForChild("PlayerGui", 5) end) then
+    warn("[Dump3] Could not show the panel - results will go to the console")
+end
+getgenv().QTEDump3 = gui
+
+local function corner(obj, r)
+    local c = Instance.new("UICorner")
+    c.CornerRadius = UDim.new(0, r or 6)
+    c.Parent = obj
+end
+
+local frame = Instance.new("Frame")
+frame.Size = UDim2.fromOffset(240, 260)
+frame.Position = UDim2.fromOffset(16, 100)
+frame.BackgroundColor3 = Color3.fromRGB(26, 26, 33)
+frame.BorderSizePixel = 0
+frame.ClipsDescendants = true
+frame.Parent = gui
+corner(frame, 10)
+
+local title = Instance.new("TextLabel")
+title.Size = UDim2.new(1, -30, 0, 26)
+title.BackgroundColor3 = Color3.fromRGB(52, 36, 82)
+title.BorderSizePixel = 0
+title.TextColor3 = Color3.new(1, 1, 1)
+title.Font = Enum.Font.GothamBold
+title.TextSize = 12
+title.Text = "QTE Dump"
+title.Parent = frame
+
+local btnClose = Instance.new("TextButton")
+btnClose.Size = UDim2.new(0, 30, 0, 26)
+btnClose.Position = UDim2.new(1, -30, 0, 0)
+btnClose.BackgroundColor3 = Color3.fromRGB(150, 50, 50)
+btnClose.BorderSizePixel = 0
+btnClose.TextColor3 = Color3.new(1, 1, 1)
+btnClose.Font = Enum.Font.GothamBold
+btnClose.TextSize = 14
+btnClose.Text = "X"
+btnClose.Parent = frame
+btnClose.MouseButton1Click:Connect(function() gui:Destroy() end)
+
+local status = Instance.new("TextLabel")
+status.Size = UDim2.new(1, -16, 0, 34)
+status.Position = UDim2.new(0, 8, 0, 30)
+status.BackgroundTransparency = 1
+status.TextColor3 = Color3.fromRGB(215, 215, 225)
+status.Font = Enum.Font.Gotham
+status.TextSize = 11
+status.TextXAlignment = Enum.TextXAlignment.Left
+status.TextYAlignment = Enum.TextYAlignment.Top
+status.TextWrapped = true
+status.Text = "Working..."
+status.Parent = frame
+
+local list = Instance.new("ScrollingFrame")
+list.Size = UDim2.new(1, -16, 1, -72)
+list.Position = UDim2.new(0, 8, 0, 66)
+list.BackgroundTransparency = 1
+list.BorderSizePixel = 0
+list.ScrollBarThickness = 4
+list.CanvasSize = UDim2.new(0, 0, 0, 0)
+list.AutomaticCanvasSize = Enum.AutomaticSize.Y
+list.Parent = frame
+local layout = Instance.new("UIListLayout")
+layout.Padding = UDim.new(0, 4)
+layout.Parent = list
+
+local function setStatus(t) if status.Parent then status.Text = t end end
+
+--------------------------------------------------------------------
+-- COLLECT
+--------------------------------------------------------------------
+local function decompileSafe(scr)
+    local ok, src = pcall(decompile, scr)
+    if ok and type(src) == "string" then return src end
+    return nil
+end
+
+local function lastLines(src, n)
     local lines = {}
     for l in (src .. "\n"):gmatch("(.-)\n") do lines[#lines + 1] = l end
-
-    local keep, hits = {}, 0
-    for i, l in ipairs(lines) do
-        for _, p in ipairs(PATTERNS) do
-            if l:find(p, 1, true) then
-                hits = hits + 1
-                for j = math.max(1, i - RADIUS), math.min(#lines, i + RADIUS) do keep[j] = true end
-                break
-            end
-        end
+    local parts = {}
+    for i = math.max(1, #lines - n + 1), #lines do
+        parts[#parts + 1] = ("%d: %s"):format(i, lines[i])
     end
-
-    local parts, last = {}, 0
-    for i = 1, #lines do
-        if keep[i] then
-            if i > last + 1 then parts[#parts + 1] = "-- ..." end
-            parts[#parts + 1] = ("%d: %s"):format(i, lines[i])
-            last = i
-        end
-    end
-    return table.concat(parts, "\n"), #lines, hits
+    return table.concat(parts, "\n"), #lines
 end
 
-local remote = RS:WaitForChild("Remotes"):WaitForChild("Information"):WaitForChild("RemoteFunction")
-add("Remote: " .. remote:GetFullName() .. " (" .. remote.ClassName .. ")")
-
-if not (getconnections and decompile) then
-    add("This executor is missing getconnections or decompile")
-else
-    local scripts, seenScript = {}, {}
+local function findCombatHandle()
+    local remote = RS:WaitForChild("Remotes"):WaitForChild("Information"):WaitForChild("RemoteFunction")
     local ok, conns = pcall(getconnections, remote.OnClientEvent)
-    if ok and type(conns) == "table" then
-        for _, c in ipairs(conns) do
-            local okf, fn = pcall(function() return c.Function end)
-            if okf and type(fn) == "function" then
-                local scr
-                if getscriptfromfunction then
-                    local ok2, s = pcall(getscriptfromfunction, fn)
-                    if ok2 then scr = s end
-                end
-                if not scr and getfenv then
-                    local ok2, env = pcall(getfenv, fn)
-                    if ok2 and type(env) == "table" then scr = rawget(env, "script") end
-                end
-                if scr and not seenScript[scr] then
-                    seenScript[scr] = true
-                    scripts[#scripts + 1] = scr
-                end
+    if not (ok and type(conns) == "table") then return nil end
+    for _, c in ipairs(conns) do
+        local okf, fn = pcall(function() return c.Function end)
+        if okf and type(fn) == "function" then
+            local scr
+            if getscriptfromfunction then
+                local ok2, s = pcall(getscriptfromfunction, fn)
+                if ok2 then scr = s end
             end
+            if not scr and getfenv then
+                local ok2, env = pcall(getfenv, fn)
+                if ok2 and type(env) == "table" then scr = rawget(env, "script") end
+            end
+            if scr and scr.Name == "CombatHandle" then return scr end
         end
     end
+    return nil
+end
 
-    add("Scripts with handlers on this remote: " .. #scripts)
-    for _, scr in ipairs(scripts) do
-        add("")
-        add("##### " .. scr:GetFullName())
-        local okd, src = pcall(decompile, scr)
-        if okd and type(src) == "string" then
-            local text, total, hits = windows(src)
-            add(("(%d lines, %d matching lines)"):format(total, hits))
-            if hits > 0 then add(text) end
+local function buildParts(entries)
+    local parts = {}
+    local cur, curLabels, curLen = {}, {}, 0
+    local function flush()
+        if #cur > 0 then
+            parts[#parts + 1] = { text = table.concat(cur, "\n\n"), labels = curLabels }
+            cur, curLabels, curLen = {}, {}, 0
+        end
+    end
+    for _, e in ipairs(entries) do
+        local text = "##### " .. e.label .. "\n" .. e.body
+        if #text > CAP then
+            flush()
+            local chunk, len, idx = {}, 0, 1
+            for line in (text .. "\n"):gmatch("(.-)\n") do
+                if len + #line + 1 > CAP and #chunk > 0 then
+                    parts[#parts + 1] = { text = table.concat(chunk, "\n"), labels = { e.label .. " (" .. idx .. ")" } }
+                    chunk, len, idx = {}, 0, idx + 1
+                end
+                chunk[#chunk + 1] = line
+                len = len + #line + 1
+            end
+            if #chunk > 0 then
+                parts[#parts + 1] = { text = table.concat(chunk, "\n"), labels = { e.label .. " (" .. idx .. ")" } }
+            end
         else
-            add("(decompile failed)")
+            if curLen + #text > CAP then flush() end
+            cur[#cur + 1] = text
+            curLabels[#curLabels + 1] = e.label
+            curLen = curLen + #text + 2
         end
     end
+    flush()
+    return parts
 end
 
-local text = table.concat(out, "\n")
-if #text > MAX_CHARS then
-    text = text:sub(1, MAX_CHARS) .. "\n-- (cut off at " .. MAX_CHARS .. " chars)"
-end
+task.spawn(function()
+    if not (getconnections and decompile) then
+        setStatus("This executor is missing getconnections or decompile")
+        return
+    end
 
-if setclipboard then
-    local ok = pcall(setclipboard, text)
-    print(("[Dump2] %d characters %s"):format(#text, ok and "copied to clipboard" or "ready (clipboard failed)"))
-else
-    print("[Dump2] No clipboard support - output below")
-    print(text)
-end
+    local combat = findCombatHandle()
+    if not combat then
+        setStatus("Could not find CombatHandle")
+        return
+    end
+
+    local entries = {}
+
+    -- entry 1: layout of CombatHandle + how it ends (where the reply is sent)
+    local info = { "CombatHandle: " .. combat:GetFullName(), "", "--- scripts inside ---" }
+    local modules = {}
+    for _, d in ipairs(combat:GetDescendants()) do
+        if d:IsA("LuaSourceContainer") then
+            info[#info + 1] = d.ClassName .. "  " .. d.Name
+            if d:IsA("ModuleScript") then modules[#modules + 1] = d end
+        end
+    end
+    setStatus("Reading CombatHandle...")
+    local mainSrc = decompileSafe(combat)
+    if mainSrc then
+        local tail, total = lastLines(mainSrc, TAIL_LINES)
+        info[#info + 1] = ""
+        info[#info + 1] = ("--- last %d of %d lines of CombatHandle ---"):format(TAIL_LINES, total)
+        info[#info + 1] = tail
+    else
+        info[#info + 1] = "(CombatHandle decompile failed)"
+    end
+    entries[#entries + 1] = { label = "CombatHandle overview", body = table.concat(info, "\n") }
+
+    -- QTE modules first (Dodge at the very front), then everything else
+    table.sort(modules, function(a, b)
+        local qa, qb = a.Name:find("QTE", 1, true) ~= nil, b.Name:find("QTE", 1, true) ~= nil
+        if qa ~= qb then return qa end
+        local da, db = a.Name:lower():find("dodge", 1, true) ~= nil, b.Name:lower():find("dodge", 1, true) ~= nil
+        if da ~= db then return da end
+        return a.Name < b.Name
+    end)
+
+    for i, m in ipairs(modules) do
+        setStatus(("Reading modules %d/%d: %s"):format(i, #modules, m.Name))
+        local src = decompileSafe(m)
+        entries[#entries + 1] = { label = m.Name, body = src or "(decompile failed)" }
+        task.wait() -- keep the game responsive
+    end
+
+    local parts = buildParts(entries)
+    setStatus(("Done: %d parts. Tap a button, then paste it in chat. Do each part in order."):format(#parts))
+
+    for i, part in ipairs(parts) do
+        local label = table.concat(part.labels, ", ")
+        local b = Instance.new("TextButton")
+        b.Size = UDim2.new(1, -4, 0, 36)
+        b.BackgroundColor3 = Color3.fromRGB(45, 110, 160)
+        b.BorderSizePixel = 0
+        b.TextColor3 = Color3.new(1, 1, 1)
+        b.Font = Enum.Font.GothamBold
+        b.TextSize = 11
+        b.TextWrapped = true
+        b.TextTruncate = Enum.TextTruncate.AtEnd
+        b.Text = ("Copy part %d/%d: %s"):format(i, #parts, label)
+        b.LayoutOrder = i
+        b.Parent = list
+        corner(b, 6)
+        b.MouseButton1Click:Connect(function()
+            if setclipboard then
+                local ok = pcall(setclipboard, part.text)
+                setStatus(ok and ("Copied part %d/%d (%d chars)"):format(i, #parts, #part.text) or "Copy failed - see console")
+                b.BackgroundColor3 = Color3.fromRGB(46, 150, 80)
+            else
+                print(part.text)
+                setStatus("No clipboard support - part printed to the console")
+            end
+        end)
+    end
+
+    print(("[Dump3] ready: %d parts"):format(#parts))
+end)
